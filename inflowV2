@@ -1,0 +1,147 @@
+  subroutine update_inflow(dom, time_day)
+    !
+    ! inputs:  ts_in, time_day, rho_avg
+    ! outputs: z_in, q_in, t_in, c_in, rho_in, u, t, c
+    !
+    use mod_parameter, only : gravity, nps, turbid_density, rho_water
+
+    implicit none
+
+    type(domain), intent(inout) :: dom
+    real, intent(in) :: time_day
+
+    integer :: nz, k_srf
+    real :: z_srf, rho_in, z_in, b_in
+    integer, pointer :: kc_bot(:)
+    real, pointer :: z(:), zc(:), dz(:), rho_(:), dx(:)
+    type(domain), pointer :: dom_up
+
+    integer :: i, k, kc, kc_min
+    real :: tmp, eps, delta, zeta, drho, sum_vol
+    real, allocatable :: array(:), f(:), infwgt(:)
+    real, pointer, dimension(:,:) :: vol
+
+    !--- pointer and allocate arrays ---------------
+    nz=dom%nz; k_srf=dom%k_srf; z_srf=dom%z_srf; kc_bot=>dom%kc_bot
+    z=>dom%z; zc=>dom%zc; dz=>dom%dz; rho_=>dom%rho_avg
+    dx=>dom%dx; vol=>dom%vol
+    allocate (f(dom%nz))
+    allocate (infwgt(k_srf))
+    !-----------------------------------------------
+
+    if (dom%id_up > 0) then
+
+      ! one-way coupling up- and down-stream domains.
+      ! inflow of downstream domain to outflow of upstream domain
+      dom_up => doms(dom%id_up)
+      dom%q_in = sum(dom_up%q_outs)
+      dom%t_in = dom_up%t_out
+      dom%c_in = dom_up%c_out
+#ifdef SCALAR
+      dom%s_in = dom_up%s_out
+#endif
+
+    else
+
+      ! individual inflows to up- and down-stream domains.
+      ! set inlet values at current time
+      allocate (array(dom%ts_in%nv))
+      call timeseries_interp(dom%ts_in, time_day, array)
+      dom%q_in = array(1)  ! inlet flow, m3/s
+      dom%t_in = array(2)  ! inlet temp., deg-C
+      do i=1, nps
+        dom%c_in(i) = array(2+i)  ! inlet SS, g/m3
+      enddo
+#ifdef SCALAR
+      dom%s_in = array(2+nps+1)  ! inlet scalar, -
+#endif
+      deallocate (array)
+
+    endif
+
+    ! inlet density
+    rho_in = turbid_density(dom%t_in, sum(dom%c_in))
+
+    ! inlet height as equivalent density
+    kc_min = minval(kc_bot)
+
+    kc = -1
+    z_in = -999.
+
+    ! Set allways Surface Inflow (2024/05/01)
+      z_in = z_srf
+      kc = k_srf
+      
+    ! normalized density gradient, 1/m
+    eps = -(rho_(kc) - rho_(kc-1))/(z(kc) - z(kc-1))/rho_water
+    eps = max(1.e-6, eps)
+
+    ! b_in according to average inflow cells, m
+    sum_vol = 0.0
+    do k=kc_min, k_srf
+      i = dom%i_inlet(k)
+      sum_vol = sum_vol + vol(i,k)
+    enddo
+    b_in = sum_vol/dx(dom%i_inlet(kc))/dz(dom%i_inlet(kc))
+    dom%b_in=b_in
+
+    ! flow depth of 2d jet, m
+    delta = abs(dom%q_in) / (dom%fr_in*dom%b_in*sqrt(eps*gravity))
+    delta = min(max(dz(kc), sqrt(delta)), z(nz)-z(0))
+
+    ! density difference between inflow water and receiving cell
+    drho = rho_(kc) - rho_in
+
+    ! weighting for vertical distribution
+    f(:) = 0.0
+    infwgt(:) = 1.0
+    do k= kc_min, k_srf
+      if ((k_srf - kc_min + 1) == 2) then
+        if (drho > 0.0) then
+          infwgt(k_srf-1:k_srf) = (/1.0, 2.0/)
+          f(k) = infwgt(k)/3
+        else if (drho < 0.0) then
+          infwgt(kc_min:kc_min+1) = (/2.0, 1.0/)
+          f(k) = infwgt(k)/3
+        endif
+      else if ((k_srf - kc_min + 1) >= 3) then
+        if (drho > 0.0) then
+          infwgt(k_srf-2:k_srf) = (/1.0, 3.0, 5.0/)
+          f(k) = infwgt(k)/9
+        else if (drho < 0.0) then
+          infwgt(kc_min:kc_min+2) = (/5.0, 3.0, 1.0/)
+          f(k) = infwgt(k)/9
+        endif
+      endif
+    enddo
+
+    ! inlet velocity
+    tmp = 1.e-8
+    do k=1, k_srf
+      i = dom%i_inlet(k)
+      tmp = tmp + dom%au(i,k)*f(k)
+    enddo
+    do k=1, k_srf
+      i = dom%i_inlet(k)
+      dom%u(i,k) = dom%q_in*f(k)/tmp
+    enddo
+
+    ! inlet temerature and SS
+    do k=1, k_srf
+      i = dom%i_inlet(k)
+      dom%t(i,k) = dom%t_in
+      dom%c(i,k,:) = dom%c_in(:)
+#ifdef SCALAR
+      dom%s(i,k) = dom%s_in
+#endif
+    enddo
+
+    ! total flowrate
+    dom%qtot_in = dom%q_in
+
+    !--- pointer and de-allocate arrays ---
+    dom%z_in=z_in; dom%delta_in=delta/1.00; dom%rho_in=rho_in
+    deallocate (f, infwgt)
+    !--------------------------------------
+
+  end subroutine update_inflow
