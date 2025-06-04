@@ -76,55 +76,54 @@
     eps = -(rho_(kc) - rho_(kc-1))/(z(kc) - z(kc-1))/rho_water
     eps = max(1.e-6, eps)
 
-    ! b_in according to average inflow cells, m
-    sum_vol = 0.0
-    do k=kc_min, k_srf
+    ! weighting for vertical distributed inlet velocity
+    i = dom%i_inlet(k)
+
+    if ((k_srf - kc_min + 1) == 1) then         ! 1 cell inflow
+      tmp = 1.e-8
+      do k=kc_min, k_srf
+        i = dom%i_inlet(k)
+        tmp = tmp + dom%au(i,k)
+      enddo
       i = dom%i_inlet(k)
-      sum_vol = sum_vol + vol(i,k)
-    enddo
-    b_in = sum_vol/dx(dom%i_inlet(kc))/dz(dom%i_inlet(kc))
-    dom%b_in=b_in
+      dom%u(i,k_srf) = dom%q_in/tmp
 
-    ! flow depth of 2d jet, m
-    delta = abs(dom%q_in) / (dom%fr_in*dom%b_in*sqrt(eps*gravity))
-    delta = min(max(dz(kc), sqrt(delta)), z(nz)-z(0))
-
-    ! density difference between inflow water and receiving cell
-    drho = rho_(kc) - rho_in
-
-    ! weighting for vertical distribution
-    f(:) = 0.0
-    infwgt(:) = 1.0
-    do k= kc_min, k_srf
-      if ((k_srf - kc_min + 1) == 2) then
-        if (drho > 0.0) then
-          infwgt(k_srf-1:k_srf) = (/1.0, 2.0/)
-          f(k) = infwgt(k)/3
-        else if (drho < 0.0) then
-          infwgt(kc_min:kc_min+1) = (/2.0, 1.0/)
-          f(k) = infwgt(k)/3
-        endif
-      else if ((k_srf - kc_min + 1) >= 3) then
-        if (drho > 0.0) then
-          infwgt(k_srf-2:k_srf) = (/1.0, 3.0, 5.0/)
-          f(k) = infwgt(k)/9
-        else if (drho < 0.0) then
-          infwgt(kc_min:kc_min+2) = (/5.0, 3.0, 1.0/)
-          f(k) = infwgt(k)/9
-        endif
+    else if ((k_srf - kc_min + 1) == 2) then    ! 2 cells inflow
+      if (rho_(k_srf) > rho_in) then            ! surface density heavier than inflow density
+        tmp = 1.e-8
+        do k=kc_min, k_srf
+          i = dom%i_inlet(k)
+          tmp = tmp + dom%au(i,k)
+        enddo
+        i = dom%i_inlet(k)
+        dom%u(i,k_srf) = dom%q_in/tmp*2/3
+        dom%u(i,k_srf-1) = dom%q_in/tmp*1/3
+      else                                       ! surface density lighter than inflow density
+        dom%u(i,k_srf) = dom%q_in/tmp*1/3
+        dom%u(i,k_srf-1) = dom%q_in/tmp*2/3
       endif
-    enddo
 
-    ! inlet velocity
-    tmp = 1.e-8
-    do k=1, k_srf
-      i = dom%i_inlet(k)
-      tmp = tmp + dom%au(i,k)*f(k)
-    enddo
-    do k=1, k_srf
-      i = dom%i_inlet(k)
-      dom%u(i,k) = dom%q_in*f(k)/tmp
-    enddo
+    else if ((k_srf - kc_min + 1) == 3) then    ! 3 cells inflow
+      if (rho_(k_srf) > rho_in .and. rho_(k_srf-1) > rho_in) then    ! surface and 2nd layer density heavier than inflow density
+        tmp = 1.e-8
+        do k=kc_min, k_srf
+          i = dom%i_inlet(k)
+          tmp = tmp + dom%au(i,k)
+        enddo
+        i = dom%i_inlet(k)
+        dom%u(i,k_srf) = dom%q_in/tmp*5/9
+        dom%u(i,k_srf-1) = dom%q_in/tmp*3/9
+        dom%u(i,k_srf-2) = dom%q_in/tmp*1/9
+      else if (rho_(k_srf) < rho_in .and. rho_(k_srf-1) < rho_in) then    ! surface and 2nd density lighter than inflow density
+        dom%u(i,k_srf) = dom%q_in/tmp*1/9
+        dom%u(i,k_srf-1) = dom%q_in/tmp*3/9
+        dom%u(i,k_srf-2) = dom%q_in/tmp*5/9
+      else
+        dom%u(i,k_srf) = dom%q_in/tmp*1/6
+        dom%u(i,k_srf-1) = dom%q_in/tmp*4/6
+        dom%u(i,k_srf-2) = dom%q_in/tmp*1/6
+      endif
+    enfif
 
     ! inlet temerature and SS
     do k=1, k_srf
