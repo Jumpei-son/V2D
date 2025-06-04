@@ -1,0 +1,91 @@
+program density_flow
+  implicit none
+  integer, parameter :: Nx=50, Nz=50, nt=500
+  real, parameter :: Lx=1.0, Lz=1.0, dt=0.001
+  real, parameter :: dx=Lx/Nx, dz=Lz/Nz
+  real, parameter :: nu=1.0e-6, kappa=1.0e-6
+  real, parameter :: g=9.81, rho0=1000.0, alpha=0.0002, T0=20.0
+
+  real :: u(Nz, Nx), w(Nz, Nx), T(Nz, Nx), rho(Nz, Nx)
+  real :: dpdx(Nz, Nx), du(Nz, Nx), dT(Nz, Nx)
+  real :: dudx(Nz, Nx)
+  integer :: i, j, n
+
+  ! 初期化
+  u = 0.0
+  T = T0 - 5.0 * spread([(real(j), j=1,Nz)], 2, Nx) * dz
+  w = 0.0
+
+  do n = 1, nt
+    ! 密度 (Boussinesq)
+    rho = rho0 * (1.0 - alpha * (T - T0))
+
+    ! 圧力勾配（鉛直積分）
+    dpdx = 0.0
+    do j = 2, Nz
+      do i = 1, Nx
+        dpdx(j,i) = g * alpha * (T(j-1,i) - T(j,i)) * dz
+      end do
+    end do
+
+    ! 水平風上差分 (一次)
+    do j = 1, Nz
+      do i = 2, Nx-1
+        if (u(j,i) > 0.0) then
+          du(j,i) = -u(j,i)*(u(j,i) - u(j,i-1))/dx
+        else
+          du(j,i) = -u(j,i)*(u(j,i+1) - u(j,i))/dx
+        end if
+        du(j,i) = du(j,i) - (1.0/rho0)*dpdx(j,i)
+      end do
+    end do
+
+    ! 拡散項（簡略化：鉛直2階差分）
+    do j = 2, Nz-1
+      do i = 1, Nx
+        du(j,i) = du(j,i) + nu * (u(j+1,i) - 2.0*u(j,i) + u(j-1,i)) / dz**2
+      end do
+    end do
+
+    ! u更新
+    u = u + dt * du
+
+    ! w計算（連続式からの積分）
+    do i = 1, Nx
+      dudx(1,i) = (u(1,min(i+1,Nx)) - u(1,i)) / dx
+    end do
+    do j = 2, Nz
+      do i = 1, Nx
+        dudx(j,i) = (u(j,min(i+1,Nx)) - u(j,i)) / dx
+        w(j,i) = w(j-1,i) - dz * dudx(j,i)
+      end do
+    end do
+
+    ! 温度移流（風上差分）
+    do j = 2, Nz-1
+      do i = 2, Nx-1
+        if (u(j,i) > 0.0) then
+          dT(j,i) = -u(j,i)*(T(j,i) - T(j,i-1))/dx
+        else
+          dT(j,i) = -u(j,i)*(T(j,i+1) - T(j,i))/dx
+        end if
+        if (w(j,i) > 0.0) then
+          dT(j,i) = dT(j,i) - w(j,i)*(T(j,i) - T(j-1,i))/dz
+        else
+          dT(j,i) = dT(j,i) - w(j,i)*(T(j+1,i) - T(j,i))/dz
+        end if
+      end do
+    end do
+
+    ! 拡散項（鉛直2階）
+    do j = 2, Nz-1
+      do i = 1, Nx
+        dT(j,i) = dT(j,i) + kappa * (T(j+1,i) - 2.0*T(j,i) + T(j-1,i)) / dz**2
+      end do
+    end do
+
+    ! 温度更新
+    T = T + dt * dT
+  end do
+
+  print *, "計算終了"
