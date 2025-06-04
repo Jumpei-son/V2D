@@ -1,0 +1,168 @@
+  subroutine update_inflow(dom, time_day)
+    !
+    ! inputs:  ts_in, time_day, rho_avg
+    ! outputs: z_in, q_in, t_in, s_in, rho_in, u, t, s
+    !
+    use mod_parameter, only : gravity, nps, turbid_density, rho_water
+#ifdef WQ
+    use mod_parameter, only : nwq
+#endif
+#ifdef TRACER
+    use mod_parameter, only : ntr
+#endif
+
+    implicit none
+
+    type(domain), intent(inout) :: dom
+    real, intent(in) :: time_day
+
+    integer :: nz, k_srf
+    real :: z_srf, rho_in, z_in
+    integer, pointer :: kc_bot(:)
+    real, pointer :: z(:), zc(:), dz(:), rho_(:)
+    type(domain), pointer :: dom_up
+
+    integer :: i, k, kc, kc_min
+    real :: tmp, eps, delta, zeta
+    real, allocatable :: array(:), f(:)
+
+    !--- pointer and allocate arrays ---------------
+    nz=dom%nz; k_srf=dom%k_srf; z_srf=dom%z_srf; kc_bot=>dom%kc_bot
+    z=>dom%z; zc=>dom%zc; dz=>dom%dz; rho_=>dom%rho_avg
+    allocate (f(dom%nz))
+    !-----------------------------------------------
+
+    if (dom%id_up > 0) then
+
+      ! one-way coupling up- and down-stream domains.
+      ! inflow of downstream domain to outflow of upstream domain
+      dom_up => doms(dom%id_up)
+      dom%q_in = sum(dom_up%q_outs)
+      dom%t_in = dom_up%t_out
+      dom%s_in = dom_up%s_out
+#ifdef WQ
+      dom%wq_in = dom_up%wq_out
+#endif
+#ifdef TRACER
+      dom%tr_in = dom_up%tr_out
+#endif
+
+    else
+
+      ! individual inflows to up- and down-stream domains.
+      ! set inlet values at current time
+      allocate (array(dom%ts_in%nv))
+      call timeseries_interp(dom%ts_in, time_day, array)
+      dom%q_in = array(1)  ! inlet flow, m3/s
+      dom%t_in = array(2)  ! inlet temp., deg-C
+      do i=1, nps
+        dom%s_in(i) = array(2+i)  ! inlet SS, g/m3
+      enddo
+#ifdef WQ
+      do i=1, nwq
+        dom%wq_in(i) = array(2+nps+i)   ! inlet wq, g/m3
+      enddo
+#endif
+#ifdef TRACER
+      do i=1, ntr
+#ifndef WQ
+        dom%tr_in = array(2+nps+i)      ! inlet tracer, -
+#else
+        dom%tr_in = array(2+nps+nwq+i)  ! inlet tracer, -
+#endif
+      enddo
+#endif
+      deallocate (array)
+
+    endif
+
+    ! inlet density
+    rho_in = turbid_density(dom%t_in, sum(dom%s_in))
+
+    ! inlet height as equivalent density
+    kc_min = minval(kc_bot)
+
+    kc = -1
+    z_in = -999.
+
+    if (rho_in <= rho_(k_srf-1)) then
+      z_in = z_srf
+      kc = k_srf
+    else if (rho_(kc_min) <= rho_in) then
+      z_in = zc(kc_min)
+      kc = kc_min
+    else
+      do k=k_srf-1, kc_min+1, -1
+        if (rho_(k-1) >= rho_in .and. rho_in >= rho_(k)) then
+          tmp = (rho_in - rho_(k))/(rho_(k-1) - rho_(k) + 1.e-8)
+          z_in = tmp*z(k-1) + (1.0 - tmp)*z(k)
+          kc = k
+          exit
+        endif
+      enddo
+    endif
+
+    if (z_in < dom%z_in_lowlim) then
+      z_in = dom%z_in_lowlim
+      dom%z_in = z_in
+      do k=kc_min, k_srf
+        if (zc(k-1) <= z_in .and. z_in <= zc(k)) then
+          kc = k
+          exit
+        endif
+      enddo
+    endif
+
+    if (kc < 0) then
+      print *, 'error: cant find kc, in subroutine update_inflow'
+      stop
+   endif
+
+    ! normalized density gradient, 1/m
+    eps = -(rho_(kc) - rho_(kc-1))/(z(kc) - z(kc-1))/rho_water
+    eps = max(1.e-6, eps)
+
+    ! flow depth of 2d jet, m
+    delta = abs(dom%q_in) / (dom%fr_in*dom%b_in*sqrt(eps*gravity))
+    delta = min(max(dz(kc), sqrt(delta)), z(nz)-z(0))
+
+    ! velocity profile function
+    f(:) = 0.0
+    do k=1, k_srf
+      zeta = (zc(k) - z_in)/delta
+      if (-0.5 <= zeta .and. zeta <= 0.5) f(k) = exp(-0.5*(3.92*zeta)**2)
+    enddo
+
+    ! inlet velocity
+    tmp = 1.e-8
+    do k=1, k_srf
+      i = dom%i_inlet(k)
+      tmp = tmp + dom%au(i,k)*f(k)
+    enddo
+    do k=1, k_srf
+      i = dom%i_inlet(k)
+      dom%u(i,k) = dom%q_in*f(k)/tmp
+    enddo
+
+    ! inlet temerature and SS
+    do k=1, k_srf
+      i = dom%i_inlet(k)
+      dom%t(i,k) = dom%t_in
+      dom%s(i,k,:) = dom%s_in(:)
+#ifdef WQ
+      dom%wq(i,k,:) = dom%wq_in(:)
+#endif
+#ifdef TRACER
+      dom%tr(i,k,:) = dom%tr_in(:)
+#endif
+    enddo
+
+    ! total flowrate
+    dom%qtot_in = dom%q_in
+
+    !--- pointer and de-allocate arrays ---
+    dom%z_in=z_in; dom%delta_in=delta; dom%rho_in=rho_in
+    deallocate (f)
+    !--------------------------------------
+
+  end subroutine update_inflow
