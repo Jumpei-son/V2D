@@ -1,0 +1,500 @@
+module mod_momentum
+
+  implicit none
+
+  logical :: pressure_grad=.false.  ! impose(T) or expose(F) pressure gradient
+
+contains
+
+  subroutine set_momentum()
+
+    implicit none
+
+    ! namelist
+    namelist /momentum/ pressure_grad
+
+    ! loading from namelist file
+    open(10, file='namelist.in', status='old')
+    read(10, nml=momentum)
+    close(10)
+
+    write(6, nml=momentum)
+
+  end subroutine set_momentum
+
+
+  subroutine update_momentum(dom, dt_sec)
+    !
+    ! inputs:  u, w, dmx, dmz, dt_sec
+    ! outputs: u, w
+    !
+    use mod_parameter, only : rho_water
+    use mod_domain, only : domain
+
+    implicit none
+
+    type(domain), intent(inout) :: dom
+    real, intent(in) :: dt_sec
+
+    integer :: nx, nz, k_srf
+    integer, pointer, dimension(:) :: k_bot, kc_bot
+    real, pointer, dimension(:) :: dx, dzs
+    real, pointer, dimension(:,:) :: au, aw, aus, aws, vols
+    real, pointer, dimension(:,:) :: rho, p, dmx, dmz
+
+    integer :: i, j, k
+    real :: rhs, fp, fm, fxm, fxp, fzm, fzp, q_col_
+    real, allocatable :: u(:,:), w(:,:)
+
+    !--- pointer, allocation ----------------------------
+    nx=dom%nx; nz=dom%nz
+    k_bot=>dom%k_bot; kc_bot=>dom%kc_bot; k_srf=dom%k_srf
+    dx=>dom%dx; dzs=>dom%dzs
+    rho=>dom%rho; p=>dom%p; dmx=>dom%dmx; dmz=>dom%dmz
+    au=>dom%au; aw=>dom%aw; aus=>dom%aus; aws=>dom%aws; vols=>dom%vols
+    allocate (u(0:nx,nz), w(nx,0:nz))
+    !----------------------------------------------------
+
+    u=dom%u;  w=dom%w
+
+    do i=1, nx-1
+      do k=k_bot(i), k_srf
+
+        ! advection-x
+        fm = (u(i-1,k) + u(i,k))/2*dom%aus(i,k)
+        if (fm >= 0.0) then
+          fm = fm*u(i-1,k)
+        else
+          fm = fm*u(i,k)
+        endif
+
+        fp = (u(i,k) + u(i+1,k))/2*dom%aus(i+1,k)
+        if (fp >= 0.0) then
+          fp = fp*u(i,k)
+        else
+          fp = fp*u(i+1,k)
+        endif
+
+        fxm = -fm
+        fxp = -fp
+
+        ! advection-z
+        fm = (w(i,k-1) + w(i+1,k-1))/2*aws(i,k-1)
+        if (k == k_bot(i)) then
+          fm = fm*0.0
+        else
+          if (fm >= 0.0) then
+            fm = fm*u(i,k-1)
+          else
+            fm = fm*u(i,k)
+          endif
+        endif
+
+        fp = (w(i,k) + w(i+1,k))/2*aws(i,k)
+        if (k == k_srf) then
+          fp = fp*u(i,k)
+        else
+          if (fp >= 0.0) then
+            fp = fp*u(i,k)
+          else
+            fp = fp*u(i,k+1)
+          endif
+        endif
+
+        fzm = -fm
+        fzp = -fp
+
+        ! diffusion-x
+        fm = dmx(i,k)*(u(i,k) - u(i-1,k))/dx(i)*aus(i,k)
+        fp = dmx(i+1,k)*(u(i+1,k) - u(i,k))/dx(i)*aus(i+1,k)
+
+        fxm = fxm + fm
+        fxp = fxp + fp
+
+        ! diffusion-z
+        if (k == k_bot(i)) then
+          fm = 0.0
+        else
+          fm = dmz(i,k-1)*(u(i,k) - u(i,k-1))/dzs(k-1)*aws(i,k-1)
+        endif
+
+        if (k == k_srf) then
+          fp = 0.0
+        else
+          fp = dmz(i,k)*(u(i,k+1) - u(i,k))/dzs(k)*aws(i,k)
+        endif
+
+        fzm = fzm + fm
+        fzp = fzp + fp
+
+        ! right hand side term
+        rhs = fxp - fxm + fzp - fzm
+
+        ! pressure gradient
+        if (pressure_grad) &
+          rhs = rhs - (p(i+1,k) - p(i,k))/dom%dxs(i)/rho_water*vols(i,k)
+
+        ! tributary
+        if (dom%n_trb > 0) then
+          if (dom%u_trb(i,k) >= 0.) &
+            rhs = rhs + (dom%u_trb(i,k) - u(i,k))*dom%q_trb(i,k)
+          if (dom%u_trb(i+1,k) < 0.) &
+            rhs = rhs + (dom%u_trb(i+1,k) - u(i,k))*dom%q_trb(i+1,k)
+        endif
+
+        ! confluence
+        if (dom%n_cnf > 0) then
+          if (dom%u_cnf(i,k) >= 0.) &
+            rhs = rhs + (dom%u_cnf(i,k) - u(i,k))*dom%q_cnf(i,k)
+          if (dom%u_cnf(i+1,k) < 0.) &
+            rhs = rhs + (dom%u_cnf(i+1,k) - u(i,k))*dom%q_cnf(i+1,k)
+        endif
+
+        ! water pipe
+        if (dom%n_wtp > 0) then
+          if (dom%u_wtp(i,k) >= 0.) &
+            rhs = rhs + (dom%u_wtp(i,k) - u(i,k))*dom%q_wtp(i,k)
+          if (dom%u_wtp(i+1,k) < 0.) &
+            rhs = rhs + (dom%u_wtp(i+1,k) - u(i,k))*dom%q_wtp(i+1,k)
+        endif
+
+        ! point inflow
+        if (dom%n_pin > 0) then
+          if (dom%u_pin(i,k) >= 0.) &
+            rhs = rhs + (dom%u_pin(i,k) - u(i,k))*dom%q_pin(i,k)
+          if (dom%u_pin(i+1,k) < 0.) &
+            rhs = rhs + (dom%u_pin(i+1,k) - u(i,k))*dom%q_pin(i+1,k)
+        endif
+
+        ! new u
+        dom%u(i,k) = u(i,k) + dt_sec*rhs/vols(i,k)
+
+      enddo
+    enddo
+
+    ! fence
+    do j=1, dom%n_fnc
+      dom%u(dom%i_fncs(j),dom%k_fncs(1,j):dom%k_fncs(2,j)) = 0.0
+    enddo
+
+    ! impose continuity on each column
+    do i=1, nx-1
+      q_col_ = 1e-10
+      do k=k_bot(i), k_srf
+        q_col_ = q_col_ + au(i,k)*dom%u(i,k)
+      enddo
+      do k=k_bot(i), k_srf
+        dom%u(i,k) = dom%u(i,k)*abs(dom%q_col(i)/q_col_)
+      enddo
+    enddo
+
+    ! new w by continuity eq.
+    do i=1, nx
+      dom%w(i,kc_bot(i)-1) = 0.0
+      do k=kc_bot(i), k_srf
+        dom%w(i,k) = ( &
+          dom%q_trb(i,k) + dom%q_cnf(i,k) + dom%q_wtp(i,k) + &
+          dom%q_pin(i,k) + dom%q_pout(i,k) + &
+          dom%w(i,k-1)*aw(i,k-1) - &
+          dom%u(i,k)*au(i,k) + dom%u(i-1,k)*au(i-1,k)) / aw(i,k)
+      enddo
+    enddo
+
+    ! ghost cell
+    if (k_srf < nz) then
+      do i=1, nx
+        dom%u(i,k_srf+1) = dom%u(i,k_srf)
+        dom%w(i,k_srf+1) = dom%w(i,k_srf)
+      enddo
+    endif
+
+    deallocate (u, w)
+
+  end subroutine update_momentum
+
+  subroutine update_momentum_nh(dom, dt_sec)
+    ! non-hydrostatic momentum update using Poisson pressure solver
+    use mod_parameter, only : rho_water, gravity
+    use mod_domain, only : domain
+
+    implicit none
+
+    type(domain), intent(inout) :: dom
+    real, intent(in) :: dt_sec
+
+    integer :: nx, nz, k_srf
+    integer, pointer :: k_bot(:), kc_bot(:)
+    real, pointer :: dx(:), dzs(:)
+    real, pointer :: au(:,:), aw(:,:), aus(:,:), aws(:,:), vol(:,:), vols(:,:)
+    real, pointer :: p(:,:), dmx(:,:), dmz(:,:), rho(:,:), rho_avg(:)
+
+    integer :: i, j, k
+    real :: rhs, fp, fm, fxm, fxp, fzm, fzp
+    real, allocatable :: u(:,:), w(:,:), u_star(:,:), w_star(:,:)
+    real, allocatable :: phi(:,:), div(:,:)
+    real :: dx0, dz0
+
+    nx=dom%nx; nz=dom%nz
+    k_bot=>dom%k_bot; kc_bot=>dom%kc_bot; k_srf=dom%k_srf
+    dx=>dom%dx; dzs=>dom%dzs
+    p=>dom%p; dmx=>dom%dmx; dmz=>dom%dmz
+    rho=>dom%rho; rho_avg=>dom%rho_avg
+    au=>dom%au; aw=>dom%aw; aus=>dom%aus; aws=>dom%aws
+    vol=>dom%vol; vols=>dom%vols
+
+    allocate(u(0:nx,nz), w(nx,0:nz))
+    allocate(u_star(0:nx,nz), w_star(nx,0:nz))
+    allocate(phi(0:nx,0:nz), div(0:nx,0:nz))
+
+    u = dom%u;  w = dom%w
+    u_star = u
+    w_star = w
+
+    do i=1, nx-1
+      do k=k_bot(i), k_srf
+        ! advection-x
+        fm = (u(i-1,k) + u(i,k))/2*dom%aus(i,k)
+        if (fm >= 0.0) then
+          fm = fm*u(i-1,k)
+        else
+          fm = fm*u(i,k)
+        endif
+
+        fp = (u(i,k) + u(i+1,k))/2*dom%aus(i+1,k)
+        if (fp >= 0.0) then
+          fp = fp*u(i,k)
+        else
+          fp = fp*u(i+1,k)
+        endif
+
+        fxm = -fm
+        fxp = -fp
+
+        ! advection-z
+        fm = (w(i,k-1) + w(i+1,k-1))/2*aws(i,k-1)
+        if (k == k_bot(i)) then
+          fm = fm*0.0
+        else
+          if (fm >= 0.0) then
+            fm = fm*u(i,k-1)
+          else
+            fm = fm*u(i,k)
+          endif
+        endif
+
+        fp = (w(i,k) + w(i+1,k))/2*aws(i,k)
+        if (k == k_srf) then
+          fp = fp*u(i,k)
+        else
+          if (fp >= 0.0) then
+            fp = fp*u(i,k)
+          else
+            fp = fp*u(i,k+1)
+          endif
+        endif
+
+        fzm = -fm
+        fzp = -fp
+
+        ! diffusion-x
+        fm = dmx(i,k)*(u(i,k) - u(i-1,k))/dx(i)*aus(i,k)
+        fp = dmx(i+1,k)*(u(i+1,k) - u(i,k))/dx(i)*aus(i+1,k)
+
+        fxm = fxm + fm
+        fxp = fxp + fp
+
+        ! diffusion-z
+        if (k == k_bot(i)) then
+          fm = 0.0
+        else
+          fm = dmz(i,k-1)*(u(i,k) - u(i,k-1))/dzs(k-1)*aws(i,k-1)
+        endif
+
+        if (k == k_srf) then
+          fp = 0.0
+        else
+          fp = dmz(i,k)*(u(i,k+1) - u(i,k))/dzs(k)*aws(i,k)
+        endif
+
+        fzm = fzm + fm
+        fzp = fzp + fp
+
+        ! right hand side term
+        rhs = fxp - fxm + fzp - fzm
+
+        if (pressure_grad) &
+          rhs = rhs - (p(i+1,k) - p(i,k))/dom%dxs(i)/rho_water*vols(i,k)
+
+        if (dom%n_trb > 0) then
+          if (dom%u_trb(i,k) >= 0.) &
+            rhs = rhs + (dom%u_trb(i,k) - u(i,k))*dom%q_trb(i,k)
+          if (dom%u_trb(i+1,k) < 0.) &
+            rhs = rhs + (dom%u_trb(i+1,k) - u(i,k))*dom%q_trb(i+1,k)
+        endif
+
+        ! confluence
+        if (dom%n_cnf > 0) then
+          if (dom%u_cnf(i,k) >= 0.) &
+            rhs = rhs + (dom%u_cnf(i,k) - u(i,k))*dom%q_cnf(i,k)
+          if (dom%u_cnf(i+1,k) < 0.) &
+            rhs = rhs + (dom%u_cnf(i+1,k) - u(i,k))*dom%q_cnf(i+1,k)
+        endif
+
+        ! water pipe
+        if (dom%n_wtp > 0) then
+          if (dom%u_wtp(i,k) >= 0.) &
+            rhs = rhs + (dom%u_wtp(i,k) - u(i,k))*dom%q_wtp(i,k)
+          if (dom%u_wtp(i+1,k) < 0.) &
+            rhs = rhs + (dom%u_wtp(i+1,k) - u(i,k))*dom%q_wtp(i+1,k)
+        endif
+
+        ! point in-out
+        if (dom%n_pin > 0) then
+          if (dom%u_pin(i,k) >= 0.) &
+            rhs = rhs + (dom%u_pin(i,k) - u(i,k))*dom%q_pin(i,k)
+          if (dom%u_pin(i+1,k) < 0.) &
+            rhs = rhs + (dom%u_pin(i+1,k) - u(i,k))*dom%q_pin(i+1,k)
+        endif
+
+        u_star(i,k) = u(i,k) + dt_sec*rhs/vols(i,k)
+
+      enddo
+    enddo
+
+    ! fence
+    do j=1, dom%n_fnc
+      u_star(dom%i_fncs(j),dom%k_fncs(1,j):dom%k_fncs(2,j)) = 0.0
+    enddo
+
+    ! provisional vertical velocity including diffusion and buoyancy
+    do i=1, nx-1
+      do k=kc_bot(i), k_srf
+
+        ! advection-x
+        fxm = 0.0
+        fxp = 0.0
+        fm = (u(i,k-1) + u(i+1,k-1))/2*dom%aus(i,k-1)
+        if (fm >= 0.0) then
+          fm = fm*w(i,k-1)
+        else
+          fm = fm*w(i,k)
+        endif
+        fp = (u(i,k) + u(i+1,k))/2*dom%aus(i,k)
+        if (fp >= 0.0) then
+          fm = fm*w(i,k)
+        else
+          fm = fm*w(i,k+1)
+        endif
+
+        fxm = -fm
+        fxp = -fp
+
+        ! advection-z
+        fzm = 0.0
+        fzp = 0.0
+        fm = (w(i,k-1) + w(i,k))/2*aws(i,k-1)
+        if (k == k_bot(i)) then
+          fm = fm*0.0
+        else
+          if (fm >= 0.0) then
+            fm = fm*w(i,k-1)
+          else
+            fm = fm*w(i,k)
+          endif
+        endif
+
+        fp = (w(i,k) + w(i,k+1))/2*aws(i,k)
+        if (k == k_srf) then
+          fp = fp*w(i,k)
+        else
+          if (fp >= 0.0) then
+            fp = fp*w(i,k)
+          else
+            fp = fp*u(i+1,k)
+          endif
+        endif
+
+        fzm = -fm
+        fzp = -fp
+
+
+        rhs = fxp - fxm + fzp - fzm
+        rhs = rhs + gravity*(rho(i, k-1) - rho(i,k))/rho_water*vol(i,k)
+
+        w_star(i,k) = w(i,k) + dt_sec*rhs/vol(i,k)
+
+      enddo
+    enddo
+
+    ! divergence of provisional velocity
+    div = 0.0
+    do i=1, nx-1
+      do k=k_bot(i), k_srf
+        div(i,k) = ( &
+          u_star(i,k)*au(i,k) - u_star(i-1,k)*au(i-1,k) + &
+          w_star(i,k)*aw(i,k) - w_star(i,k-1)*aw(i,k-1) ) / vol(i,k)
+      enddo
+    enddo
+
+    phi = 0.0
+    dx0 = dx(1)
+    dz0 = dzs(1)
+    call solve_poisson(phi, div, dx0, dz0, nx, nz, 1.0e-4, 500)
+
+    do i=1, nx-1
+      do k=k_bot(i), k_srf
+        dom%u(i,k) = u_star(i,k) - dt_sec/rho_water * &
+          (phi(i+1,k) - phi(i,k))/dx0
+      enddo
+    enddo
+
+    do i=1, nx
+      dom%w(i,kc_bot(i)-1) = 0.0
+      do k=kc_bot(i), k_srf
+        dom%w(i,k) = w_star(i,k) - dt_sec/rho_water * &
+          (phi(i,k) - phi(i,k-1))/dz0
+      enddo
+    enddo
+
+    if (k_srf < nz) then
+      do i=1, nx
+        dom%u(i,k_srf+1) = dom%u(i,k_srf)
+        dom%w(i,k_srf+1) = dom%w(i,k_srf)
+      enddo
+    endif
+
+    deallocate(u, w, u_star, w_star, phi, div)
+
+  end subroutine update_momentum_nh
+
+  subroutine solve_poisson(phi, rhs, dx, dz, nx, nz, tol, it_max)
+    ! simple Gauss-Seidel solver for Poisson equation
+    implicit none
+    integer, intent(in) :: nx, nz, it_max
+    real, intent(in) :: dx, dz, tol
+    real, intent(inout) :: phi(0:nx,0:nz)
+    real, intent(in) :: rhs(0:nx,0:nz)
+
+    integer :: i, k, it
+    real :: dx2, dz2, denom, err, tmp
+
+    dx2 = dx*dx
+    dz2 = dz*dz
+    denom = 2.0*(1.0/dx2 + 1.0/dz2)
+
+    do it=1, it_max
+      err = 0.0
+      do i=1, nx-1
+        do k=1, nz-1
+          tmp = ((phi(i-1,k) + phi(i+1,k))/dx2 + &
+                 (phi(i,k-1) + phi(i,k+1))/dz2 - rhs(i,k)) / denom
+          err = max(err, abs(tmp - phi(i,k)))
+          phi(i,k) = tmp
+        enddo
+      enddo
+      if (err < tol) exit
+    enddo
+
+  end subroutine solve_poisson
+
+end module mod_momentum
