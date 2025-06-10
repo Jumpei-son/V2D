@@ -1,4 +1,4 @@
-  subroutine update_momentum_nh(dom, dt_sec)
+    subroutine update_momentum_nh(dom, dt_sec)
     ! non-hydrostatic momentum update using Poisson pressure solver
     use mod_parameter, only : rho_water, gravity
     use mod_domain, only : domain
@@ -38,7 +38,7 @@
 
     do i=1, nx-1
       do k=k_bot(i), k_srf
-
+        ! advection-x
         fm = (u(i-1,k) + u(i,k))/2*dom%aus(i,k)
         if (fm >= 0.0) then
           fm = fm*u(i-1,k)
@@ -56,6 +56,7 @@
         fxm = -fm
         fxp = -fp
 
+        ! advection-z
         fm = (w(i,k-1) + w(i+1,k-1))/2*aws(i,k-1)
         if (k == k_bot(i)) then
           fm = fm*0.0
@@ -81,12 +82,14 @@
         fzm = -fm
         fzp = -fp
 
+        ! diffusion-x
         fm = dmx(i,k)*(u(i,k) - u(i-1,k))/dx(i)*aus(i,k)
         fp = dmx(i+1,k)*(u(i+1,k) - u(i,k))/dx(i)*aus(i+1,k)
 
         fxm = fxm + fm
         fxp = fxp + fp
 
+        ! diffusion-z
         if (k == k_bot(i)) then
           fm = 0.0
         else
@@ -102,6 +105,7 @@
         fzm = fzm + fm
         fzp = fzp + fp
 
+        ! right hand side term
         rhs = fxp - fxm + fzp - fzm
 
         if (pressure_grad) &
@@ -114,6 +118,7 @@
             rhs = rhs + (dom%u_trb(i+1,k) - u(i,k))*dom%q_trb(i+1,k)
         endif
 
+        ! confluence
         if (dom%n_cnf > 0) then
           if (dom%u_cnf(i,k) >= 0.) &
             rhs = rhs + (dom%u_cnf(i,k) - u(i,k))*dom%q_cnf(i,k)
@@ -121,6 +126,7 @@
             rhs = rhs + (dom%u_cnf(i+1,k) - u(i,k))*dom%q_cnf(i+1,k)
         endif
 
+        ! water pipe
         if (dom%n_wtp > 0) then
           if (dom%u_wtp(i,k) >= 0.) &
             rhs = rhs + (dom%u_wtp(i,k) - u(i,k))*dom%q_wtp(i,k)
@@ -128,6 +134,7 @@
             rhs = rhs + (dom%u_wtp(i+1,k) - u(i,k))*dom%q_wtp(i+1,k)
         endif
 
+        ! point in-out
         if (dom%n_pin > 0) then
           if (dom%u_pin(i,k) >= 0.) &
             rhs = rhs + (dom%u_pin(i,k) - u(i,k))*dom%q_pin(i,k)
@@ -148,10 +155,9 @@
     ! provisional vertical velocity including diffusion and buoyancy
     do i=1, nx-1
       do k=kc_bot(i), k_srf
-        rhs = 0.0
 
         ! advection-x
-        fm = (u(i,k-1) + u(i+1,k-1))/2*aus(i,k-1)
+        fm = (u(i,k-1) + u(i+1,k-1))/2*dom%aus(i,k-1)
         if (k == k_bot(i)) then
           fm = fm*0.0
         else
@@ -162,7 +168,7 @@
           endif
         endif
 
-        fp = (u(i,k) + u(i+1,k))/2*aus(i,k)
+        fp = (u(i,k) + u(i+1,k))/2*dom%aus(i,k)
         if (k == k_srf) then
           fp = fp*w(i,k)
         else
@@ -177,42 +183,59 @@
         fxp = -fp
 
         ! advection-z
-        fm = (w(i,k-1) + w(i,k))/2*aw(i,k-1)
-        if (fm >= 0.0) then
-          fm = fm * w(i,k-1)
+        fm = (w(i,k-1) + w(i,k))/2*aws(i,k-1)
+        if (k == k_bot(i)) then
+          fm = fm*0.0
         else
-          fm = fm * w(i,k)
+          if (fm >= 0.0) then
+            fm = fm * w(i,k-1)
+          else
+            fm = fm * w(i,k)
+          endif
         endif
 
-        fp = (w(i,k) + w(i,k+1))/2 * aw(i,k)
-        if (fp >= 0.0) then
-          fp = fp * w(i,k)
+        fp = (w(i,k) + w(i,k+1))/2*aws(i,k)
+        if (k == k_srf) then
+          fp = fp*w(i,k)
         else
-          fp = fp * w(i,k+1)
+          if (fp >= 0.0) then
+            fp = fp * w(i,k)
+          else
+            fp = fp * w(i,k+1)
+          endif
         endif
 
         fzm = -fm
         fzp = -fp
 
+        ! diffusion-x
+        fm = dmx(i,k)*(w(i,k) - w(i-1,k))/dx(i)*aus(i,k)
+        fp = dmx(i+1,k)*(w(i+1,k) - w(i,k))/dx(i)*aus(i+1,k)
+
+        fxm = fxm + fm
+        fxp = fxp + fp
+
         ! diffusion-z
-        fm = dmz(i,k-1) * (w(i,k) - w(i,k-1)) / dzs(k-1) * aw(i,k-1)
-        fp = dmz(i,k) * (w(i,k+1) - w(i,k)) / dzs(k) * aw(i,k)
+        fm = dmz(i,k-1)*(w(i,k) - w(i,k-1))/dzs(k-1)*aws(i,k-1)
+        fp = dmz(i,k)*(w(i,k+1) - w(i,k))/dzs(k)*aws(i,k)
 
         fzm = fzm + fm
         fzp = fzp + fp
 
+        ! right hand side term
         rhs = fxp - fxm + fzp - fzm
 
         ! buoyancy force term
         rhs = rhs + gravity*(rho(i, k) - rho_water)/rho_water*vols(i,k)
-        
+
         ! pressure gradient term
-        ! rhs = rhs - (dom%p(i,k+1) - dom%p(i,k)) / dom%dzs(k) / rho_water*vols(i,k)
+        ! rhs = rhs - (dom%p(i,k+1) - dom%p(i,k)) / dom%dzs(k) / rho_water * aw
 
         w_star(i,k) = w(i,k) + dt_sec*rhs/vol(i,k)
 
       enddo
     enddo
+
     ! divergence of provisional velocity
     div = 0.0
     do i=1, nx-1
@@ -253,3 +276,33 @@
     deallocate(u, w, u_star, w_star, phi, div)
 
   end subroutine update_momentum_nh
+
+  subroutine solve_poisson(phi, rhs, dx, dz, nx, nz, tol, it_max)
+    ! simple Gauss-Seidel solver for Poisson equation
+    implicit none
+    integer, intent(in) :: nx, nz, it_max
+    real, intent(in) :: dx, dz, tol
+    real, intent(inout) :: phi(0:nx,0:nz)
+    real, intent(in) :: rhs(0:nx,0:nz)
+
+    integer :: i, k, it
+    real :: dx2, dz2, denom, err, tmp
+
+    dx2 = dx*dx
+    dz2 = dz*dz
+    denom = 2.0*(1.0/dx2 + 1.0/dz2)
+
+    do it=1, it_max
+      err = 0.0
+      do i=1, nx-1
+        do k=1, nz-1
+          tmp = ((phi(i-1,k) + phi(i+1,k))/dx2 + &
+                 (phi(i,k-1) + phi(i,k+1))/dz2 - rhs(i,k)) / denom
+          err = max(err, abs(tmp - phi(i,k)))
+          phi(i,k) = tmp
+        enddo
+      enddo
+      if (err < tol) exit
+    enddo
+
+  end subroutine solve_poisson
