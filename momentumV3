@@ -1,0 +1,233 @@
+module mod_momentum
+
+  implicit none
+
+  logical :: pressure_grad=.false.  ! impose(T) or expose(F) pressure gradient
+
+contains
+
+  subroutine set_momentum()
+
+    implicit none
+
+    ! namelist
+    namelist /momentum/ pressure_grad
+
+    ! loading from namelist file
+    open(10, file='namelist.in', status='old')
+    read(10, nml=momentum)
+    close(10)
+
+    write(6, nml=momentum)
+
+  end subroutine set_momentum
+
+
+  subroutine update_momentum(dom, dt_sec)
+    !
+    ! inputs:  u, w, dmx, dmz, dt_sec
+    ! outputs: u, w
+    !
+    use mod_parameter, only : rho_water, gravity
+    use mod_domain, only : domain
+
+    implicit none
+
+    type(domain), intent(inout) :: dom
+    real, intent(in) :: dt_sec
+
+    integer :: nx, nz, k_srf
+    integer, pointer, dimension(:) :: k_bot, kc_bot
+    real, pointer, dimension(:) :: dx, dzs
+    real, pointer, dimension(:,:) :: au, aw, aus, aws, vols
+    real, pointer, dimension(:,:) :: rho, p, dmx, dmz
+
+    integer :: i, j, k
+    real :: rhs, fp, fm, fxm, fxp, fzm, fzp, q_col_
+    real, allocatable :: u(:,:), w(:,:), w_tmp(:,:)
+
+    !--- pointer, allocation ----------------------------
+    nx=dom%nx; nz=dom%nz
+    k_bot=>dom%k_bot; kc_bot=>dom%kc_bot; k_srf=dom%k_srf
+    dx=>dom%dx; dzs=>dom%dzs
+    rho=>dom%rho; p=>dom%p; dmx=>dom%dmx; dmz=>dom%dmz
+    au=>dom%au; aw=>dom%aw; aus=>dom%aus; aws=>dom%aws; vols=>dom%vols
+    allocate (u(0:nx,nz), w(nx,0:nz), w_tmp(nx,0:nz))
+    !----------------------------------------------------
+
+    u=dom%u;  w=dom%w
+
+    do i=1, nx-1
+      do k=k_bot(i), k_srf
+
+        ! advection-x
+        fm = (u(i-1,k) + u(i,k))/2*dom%aus(i,k)
+        if (fm >= 0.0) then
+          fm = fm*u(i-1,k)
+        else
+          fm = fm*u(i,k)
+        endif
+
+        fp = (u(i,k) + u(i+1,k))/2*dom%aus(i+1,k)
+        if (fp >= 0.0) then
+          fp = fp*u(i,k)
+        else
+          fp = fp*u(i+1,k)
+        endif
+
+        fxm = -fm
+        fxp = -fp
+
+        ! advection-z
+        fm = (w(i,k-1) + w(i+1,k-1))/2*aws(i,k-1)
+        if (k == k_bot(i)) then
+          fm = fm*0.0
+        else
+          if (fm >= 0.0) then
+            fm = fm*u(i,k-1)
+          else
+            fm = fm*u(i,k)
+          endif
+        endif
+
+        fp = (w(i,k) + w(i+1,k))/2*aws(i,k)
+        if (k == k_srf) then
+          fp = fp*u(i,k)
+        else
+          if (fp >= 0.0) then
+            fp = fp*u(i,k)
+          else
+            fp = fp*u(i,k+1)
+          endif
+        endif
+
+        fzm = -fm
+        fzp = -fp
+
+        ! diffusion-x
+        fm = dmx(i,k)*(u(i,k) - u(i-1,k))/dx(i)*aus(i,k)
+        fp = dmx(i+1,k)*(u(i+1,k) - u(i,k))/dx(i)*aus(i+1,k)
+
+        fxm = fxm + fm
+        fxp = fxp + fp
+
+        ! diffusion-z
+        if (k == k_bot(i)) then
+          fm = 0.0
+        else
+          fm = dmz(i,k-1)*(u(i,k) - u(i,k-1))/dzs(k-1)*aws(i,k-1)
+        endif
+
+        if (k == k_srf) then
+          fp = 0.0
+        else
+          fp = dmz(i,k)*(u(i,k+1) - u(i,k))/dzs(k)*aws(i,k)
+        endif
+
+        fzm = fzm + fm
+        fzp = fzp + fp
+
+        ! right hand side term
+        rhs = fxp - fxm + fzp - fzm
+
+        ! pressure gradient
+        if (pressure_grad) &
+          rhs = rhs - (p(i+1,k) - p(i,k))/dom%dxs(i)/rho_water*vols(i,k)
+
+        ! tributary
+        if (dom%n_trb > 0) then
+          if (dom%u_trb(i,k) >= 0.) &
+            rhs = rhs + (dom%u_trb(i,k) - u(i,k))*dom%q_trb(i,k)
+          if (dom%u_trb(i+1,k) < 0.) &
+            rhs = rhs + (dom%u_trb(i+1,k) - u(i,k))*dom%q_trb(i+1,k)
+        endif
+
+        ! confluence
+        if (dom%n_cnf > 0) then
+          if (dom%u_cnf(i,k) >= 0.) &
+            rhs = rhs + (dom%u_cnf(i,k) - u(i,k))*dom%q_cnf(i,k)
+          if (dom%u_cnf(i+1,k) < 0.) &
+            rhs = rhs + (dom%u_cnf(i+1,k) - u(i,k))*dom%q_cnf(i+1,k)
+        endif
+
+        ! water pipe
+        if (dom%n_wtp > 0) then
+          if (dom%u_wtp(i,k) >= 0.) &
+            rhs = rhs + (dom%u_wtp(i,k) - u(i,k))*dom%q_wtp(i,k)
+          if (dom%u_wtp(i+1,k) < 0.) &
+            rhs = rhs + (dom%u_wtp(i+1,k) - u(i,k))*dom%q_wtp(i+1,k)
+        endif
+
+        ! point inflow
+        if (dom%n_pin > 0) then
+          if (dom%u_pin(i,k) >= 0.) &
+            rhs = rhs + (dom%u_pin(i,k) - u(i,k))*dom%q_pin(i,k)
+          if (dom%u_pin(i+1,k) < 0.) &
+            rhs = rhs + (dom%u_pin(i+1,k) - u(i,k))*dom%q_pin(i+1,k)
+        endif
+
+        ! new u
+        dom%u(i,k) = u(i,k) + dt_sec*rhs/vols(i,k)
+
+      enddo
+    enddo
+
+    ! fence
+    do j=1, dom%n_fnc
+      dom%u(dom%i_fncs(j),dom%k_fncs(1,j):dom%k_fncs(2,j)) = 0.0
+    enddo
+
+    ! impose continuity on each column
+    do i=1, nx-1
+      q_col_ = 1e-10
+      do k=k_bot(i), k_srf
+        q_col_ = q_col_ + au(i,k)*dom%u(i,k)
+      enddo
+      do k=k_bot(i), k_srf
+        dom%u(i,k) = dom%u(i,k)*abs(dom%q_col(i)/q_col_)
+      enddo
+    enddo
+
+    ! new w by continuity eq.
+    do i=1, nx
+      dom%w(i,kc_bot(i)-1) = 0.0
+      do k=kc_bot(i), k_srf
+        dom%w(i,k) = ( &
+          dom%q_trb(i,k) + dom%q_cnf(i,k) + dom%q_wtp(i,k) + &
+          dom%q_pin(i,k) + dom%q_pout(i,k) + &
+          dom%w(i,k-1)*aw(i,k-1) - &
+          dom%u(i,k)*au(i,k) + dom%u(i-1,k)*au(i-1,k)) / aw(i,k)
+      enddo
+    enddo
+
+    w_tmp = dom%w
+
+    ! buoyancy effect based on vertical density difference
+    do i=1, nx
+      do k=kc_bot(i), k_srf
+        dom%w(i,k) = dom%w(i,k) + dt_sec*gravity * &
+          (dom%rho(i,k-1) - dom%rho(i,k))/ rho_water
+      enddo
+    enddo
+
+    ! adjust horizontal velocity based on buoyancy-induced vertical flux change
+    do i=1, nx-1
+      do k=kc_bot(i), k_srf
+        dom%u(i,k) = dom%u(i,k) - &
+          ( (dom%w(i,k) - w_tmp(i,k))*aw(i,k) - (dom%w(i,k-1) - w_tmp(i,k-1))*aw(i,k-1) ) / au(i,k)
+      enddo
+    enddo
+
+    ! ghost cell
+    if (k_srf < nz) then
+      do i=1, nx
+        dom%u(i,k_srf+1) = dom%u(i,k_srf)
+        dom%w(i,k_srf+1) = dom%w(i,k_srf)
+      enddo
+    endif
+
+    deallocate (u, w, w_tmp)
+
+  end subroutine update_momentum
+
+end module mod_momentum
